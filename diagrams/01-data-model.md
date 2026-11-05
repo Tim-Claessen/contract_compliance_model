@@ -1,6 +1,6 @@
 # 01 Data model
 
-Every table in every schema, with all relationships. Archive tables are shown without columns: each has the same columns as its live table plus `archived_at` (see [07 Archive](07-archive.md)).
+Every table in every schema, with all relationships. Archive tables are shown without columns: each has the same columns as its live table plus `archived_at` (see [07 Archive](07-archive.md)). The three lineage tables share one archive shape, shown as `archive.src_{entity}_lineage`, with only the claim-file links drawn to keep the diagram readable. Solid lines are enforced foreign keys. Dashed lines are logical links that are not enforced: the raw end of the lineage, and everything in `archive`.
 
 ```mermaid
 erDiagram
@@ -22,25 +22,44 @@ erDiagram
   SRC_PERSON |o--o{ SRC_CLAIM_FILE : "claimed for"
   REF_CONTRACT_VENDOR ||--o{ SRC_TIMESHEET : "worked under"
   REF_CONTRACT_VENDOR ||--o{ SRC_CLAIM_FILE : "claimed under"
+  SRC_PERSON ||--|{ SRC_PERSON_LINEAGE : "built from"
+  SRC_TIMESHEET ||--|{ SRC_TIMESHEET_LINEAGE : "built from"
+  SRC_CLAIM_FILE ||--|{ SRC_CLAIM_FILE_LINEAGE : "built from"
+  REF_RUN ||--o{ SRC_PERSON_LINEAGE : "models"
+  REF_RUN ||--o{ SRC_TIMESHEET_LINEAGE : "models"
+  REF_RUN ||--o{ SRC_CLAIM_FILE_LINEAGE : "models"
+  RAW_SOURCE ||..o{ SRC_PERSON_LINEAGE : "feeds"
+  RAW_SOURCE ||..o{ SRC_TIMESHEET_LINEAGE : "feeds"
+  RAW_SOURCE ||..o{ SRC_CLAIM_FILE_LINEAGE : "feeds"
+  REF_SOURCE_TABLE_REGISTRY ||--o{ SRC_PERSON_LINEAGE : "raw table"
+  REF_SOURCE_TABLE_REGISTRY ||--o{ SRC_TIMESHEET_LINEAGE : "raw table"
+  REF_SOURCE_TABLE_REGISTRY ||--o{ SRC_CLAIM_FILE_LINEAGE : "raw table"
   REF_RUN ||--o{ RES_RESULT_SUMMARY : "produces"
   REF_TEST_DEFINITION ||--o{ RES_RESULT_SUMMARY : "generates"
   REF_CONTRACT_VENDOR ||--o{ RES_RESULT_SUMMARY : "found on"
   REF_FINDING_CATEGORY |o--o{ RES_RESULT_SUMMARY : "auto-tagged as"
-  RES_RESULT_SUMMARY ||--o{ RES_RESULT_DETAIL : "drill-through"
+  RES_RESULT_SUMMARY ||--|{ RES_RESULT_DETAIL : "evidenced by"
   REF_RUN ||--o{ RES_RESULT_DETAIL : "produces"
+  SRC_CLAIM_FILE |o--o{ RES_RESULT_DETAIL : "evidence"
+  SRC_TIMESHEET |o--o{ RES_RESULT_DETAIL : "evidence"
+  SRC_PERSON |o--o{ RES_RESULT_DETAIL : "evidence"
   RES_RESULT_SUMMARY ||--o| VAL_RESULT_VALIDATION : "validated by"
   REF_VALIDATION_RULE |o--o{ VAL_RESULT_VALIDATION : "pre-fills"
   REF_FINDING_CATEGORY |o--o{ VAL_RESULT_VALIDATION : "classified as"
   REF_RUN ||--o{ VAL_RESULT_VALIDATION : "reviews"
-  REF_RUN ||--o{ ARC_RAW_SOURCE : "archived"
-  REF_RUN ||--o{ ARC_SRC_PERSON : "archived"
-  REF_RUN ||--o{ ARC_SRC_TIMESHEET : "archived"
-  REF_RUN ||--o{ ARC_SRC_CLAIM_FILE : "archived"
-  REF_RUN ||--o{ ARC_RES_RESULT_SUMMARY : "archived"
-  REF_RUN ||--o{ ARC_RES_RESULT_DETAIL : "archived"
-  REF_RUN ||--o{ ARC_VAL_RESULT_VALIDATION : "archived"
-  ARC_RES_RESULT_SUMMARY ||--o{ ARC_RES_RESULT_DETAIL : "drill-through"
-  ARC_RES_RESULT_SUMMARY ||--o| ARC_VAL_RESULT_VALIDATION : "validated by"
+  REF_RUN ||..o{ ARC_RAW_SOURCE : "archived"
+  REF_RUN ||..o{ ARC_SRC_PERSON : "archived"
+  REF_RUN ||..o{ ARC_SRC_TIMESHEET : "archived"
+  REF_RUN ||..o{ ARC_SRC_CLAIM_FILE : "archived"
+  REF_RUN ||..o{ ARC_SRC_LINEAGE : "archived"
+  REF_RUN ||..o{ ARC_RES_RESULT_SUMMARY : "archived"
+  REF_RUN ||..o{ ARC_RES_RESULT_DETAIL : "archived"
+  REF_RUN ||..o{ ARC_VAL_RESULT_VALIDATION : "archived"
+  ARC_SRC_CLAIM_FILE ||..|{ ARC_SRC_LINEAGE : "built from"
+  ARC_RAW_SOURCE ||..o{ ARC_SRC_LINEAGE : "feeds"
+  ARC_RES_RESULT_SUMMARY ||..|{ ARC_RES_RESULT_DETAIL : "evidenced by"
+  ARC_SRC_CLAIM_FILE |o..o{ ARC_RES_RESULT_DETAIL : "evidence"
+  ARC_RES_RESULT_SUMMARY ||..o| ARC_VAL_RESULT_VALIDATION : "validated by"
 
   REF_RUN["ref.run"] {
     int run_id PK
@@ -111,7 +130,7 @@ erDiagram
     date effective_to
   }
   RAW_SOURCE["raw.{source}"] {
-    int raw_row_id PK
+    int raw_row_id PK "one sequence across all raw tables"
     int run_id FK
     string source_file
     datetime loaded_at
@@ -151,19 +170,42 @@ erDiagram
     decimal amount "as submitted"
     date submitted_date
   }
+  SRC_PERSON_LINEAGE["src.person_lineage"] {
+    int person_lineage_id PK
+    int run_id FK
+    int person_id FK "modelled row"
+    int raw_table_id FK "raw table, from the registry"
+    int raw_row_id "row in that raw table"
+  }
+  SRC_TIMESHEET_LINEAGE["src.timesheet_lineage"] {
+    int timesheet_lineage_id PK
+    int run_id FK
+    int timesheet_id FK "modelled row"
+    int raw_table_id FK "raw table, from the registry"
+    int raw_row_id "row in that raw table"
+  }
+  SRC_CLAIM_FILE_LINEAGE["src.claim_file_lineage"] {
+    int claim_file_lineage_id PK
+    int run_id FK
+    int claim_line_id FK "modelled row"
+    int raw_table_id FK "raw table, from the registry"
+    int raw_row_id "row in that raw table"
+  }
   RES_RESULT_SUMMARY["results.result_summary"] {
     int result_id PK
     int run_id FK
     int test_id FK
     int contract_vendor_id FK
     int category_id FK "auto-tag, nullable"
-    string record_key "source row the finding is about"
     string description
   }
   RES_RESULT_DETAIL["results.result_detail_{test}"] {
     int detail_id PK
     int run_id FK
     int result_id FK
+    int claim_line_id FK "if the test reads claims"
+    int timesheet_id FK "if the test reads timesheets"
+    int person_id FK "if the test reads people"
     string test_columns "test-specific columns"
   }
   VAL_RESULT_VALIDATION["validation.result_validation"] {
@@ -181,6 +223,7 @@ erDiagram
   ARC_SRC_PERSON["archive.src_person"]
   ARC_SRC_TIMESHEET["archive.src_timesheet"]
   ARC_SRC_CLAIM_FILE["archive.src_claim_file"]
+  ARC_SRC_LINEAGE["archive.src_{entity}_lineage"]
   ARC_RES_RESULT_SUMMARY["archive.results_result_summary"]
   ARC_RES_RESULT_DETAIL["archive.results_result_detail_{test}"]
   ARC_VAL_RESULT_VALIDATION["archive.validation_result_validation"]

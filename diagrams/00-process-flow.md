@@ -1,6 +1,6 @@
-# 00 Lifecycle
+# 00 Process flow
 
-How a run moves data through the five stages. Each box is a schema. `ref` persists across runs; `raw`, `src`, `results` and `validation` hold the current run only and are cleared once it is archived.
+How a run moves data through the five stages. Each box is a schema. `ref` persists across runs; `raw`, `src`, `results` and `validation` hold the current run only and are cleared once it is archived. For the data model growing stage by stage, see [lifecycle/](lifecycle/).
 
 ```mermaid
 flowchart LR
@@ -21,6 +21,7 @@ flowchart LR
 
   subgraph SRC["2. Modelled data: src"]
     src_t["src.claim_file, src.timesheet, src.person"]
+    src_l["src.{entity}_lineage"]
   end
 
   subgraph RES["3. Testing: results"]
@@ -40,7 +41,10 @@ flowchart LR
 
   files -->|load as delivered| raw_t
   raw_t -->|clean, type, key| src_t
+  src_l -.->|links each modelled row to its raw rows| raw_t
+  src_t --- src_l
   src_t -->|run tests in scope| res_t
+  res_t -.->|detail rows link to the src rows behind each finding| src_t
   res_t -->|pre-fill and review| val_t
   raw_t & src_t & res_t & val_t -->|append when finalised, then clear| arc_t
   arc_t --> arc_v
@@ -56,7 +60,7 @@ flowchart LR
 | Stage | Reads | Writes | Run status |
 | --- | --- | --- | --- |
 | 1. Raw data | Client files | `raw` | `loading` |
-| 2. Modelled data | `raw`, `ref` | `src` | `loading` |
+| 2. Modelled data | `raw`, `ref` | `src`, including lineage | `loading` |
 | 3. Testing | `src`, `ref.test_scope` | `results` | `testing` |
 | 4. Validation | `results`, `ref.validation_rule` | `validation` | `validating` |
 | 5. Archive | `raw`, `src`, `results`, `validation` | `archive` | `finalised` |

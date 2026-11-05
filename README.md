@@ -4,8 +4,6 @@
 
 A data model for testing vendor compliance against contracts on Azure SQL, with Power BI reporting. A client may hold several contracts, each with several vendors, and every vendor on every contract can need its own tests. The model starts with three sources (vendor claim files, timesheets and people) and is designed to take new sources and tests without redesign.
 
-It is adapted from the [CCM design](https://github.com/Tim-Claessen/ccm_design), with the process and risk ontologies replaced by contracts and vendors.
-
 ## How it works
 
 Each execution cycle is a **run**, and one run covers one period across every contract. A run moves through five stages:
@@ -30,16 +28,17 @@ Mermaid diagrams live in [`diagrams/`](diagrams/), one Markdown file each, so th
 
 | Diagram | Shows |
 | --- | --- |
-| [00 Lifecycle](diagrams/00-lifecycle.md) | How data flows through the five stages and which schema each sits in |
+| [00 Process flow](diagrams/00-process-flow.md) | How data flows through the five stages and which schema each sits in |
 | [01 Data model](diagrams/01-data-model.md) | Every table in every schema, with all relationships |
 | [02 Reference](diagrams/02-reference.md) | The `ref` schema: contracts, vendors, tests, categories, rules, runs |
 | [03 Raw data](diagrams/03-raw-data.md) | Stage 1: the shape every raw table shares |
-| [04 Modelled data](diagrams/04-modelled-data.md) | Stage 2: `src.person`, `src.timesheet`, `src.claim_file` |
-| [05 Testing](diagrams/05-testing.md) | Stage 3: how tests are scoped and what they produce |
+| [04 Modelled data](diagrams/04-modelled-data.md) | Stage 2: `src.person`, `src.timesheet`, `src.claim_file` and their lineage to `raw` |
+| [05 Testing](diagrams/05-testing.md) | Stage 3: how tests are scoped, what they produce, and how findings link to `src` rows |
 | [06 Validation](diagrams/06-validation.md) | Stage 4: per-run dispositions and carry-forward |
 | [07 Archive](diagrams/07-archive.md) | Stage 5: the archive copies and the reporting views |
+| [Lifecycle](diagrams/lifecycle/README.md) | The data model built up step by step through a run: `ref` tables fold in as they're used, and per-run tables appear at the stage that populates them |
 
-Mermaid ER diagrams cannot group tables into schema boxes, so each table is labelled with its schema (`src.timesheet`). The lifecycle diagram shows the schemas as boxes.
+Mermaid ER diagrams cannot group tables into schema boxes, so each table is labelled with its schema (`src.timesheet`). The process flow shows the schemas as boxes. In the ER diagrams, solid lines are enforced foreign keys and dashed lines are logical links that aren't enforced: the raw end of the lineage, and everything in `archive`.
 
 ---
 
@@ -72,11 +71,11 @@ Raw data is whatever the client gives us: claim files, timesheet exports, HR ext
 
 ### `src`: modelled source (current run only)
 
-The main focus. Raw data is cleaned, typed, de-duplicated and keyed into modelled tables that tests read from. Each row carries `run_id` and the client's natural key. Mapping from `raw` to `src` is done by load procedures, one per source.
+The main focus. Raw data is cleaned, typed, de-duplicated and keyed into modelled tables that tests read from. Each row carries `run_id` and the client's natural key. Mapping from `raw` to `src` is done by load procedures, one per source, and each load also writes the lineage linking every modelled row to the raw rows it came from (see [Lineage](#lineage)).
 
 ### `results`: calculated results (current run only)
 
-What the tests found. `result_summary` is generic, with one row per finding. Each test also writes a `result_detail_{test}` table with its own columns for drill-through. Results are calculated only: reviewers never edit them.
+What the tests found. `result_summary` is generic, with one row per finding. Each test also writes a `result_detail_{test}` table with its own columns for drill-through, and each detail row points at the `src` rows behind the finding. Results are calculated only: reviewers never edit them.
 
 ### `validation`: validated results (current run only)
 
@@ -88,11 +87,11 @@ Holds a copy of every `raw`, `src`, `results` and `validation` table, named `{sc
 
 ### Keys
 
-Every table has a surrogate primary key, separate from the natural key, and the natural key is kept. Surrogate keys come from a SQL Server `SEQUENCE` per table, not `IDENTITY`. `TRUNCATE` resets an identity column, so identity keys would repeat across runs and collide in the archive. Sequence keys are unique across all runs, so archive tables keep a single-column primary key, and Power BI relationships stay one column wide.
+Every table has a surrogate primary key, separate from the natural key, and the natural key is kept. Surrogate keys come from a SQL Server `SEQUENCE` per table, not `IDENTITY`. `TRUNCATE` resets an identity column, so identity keys would repeat across runs and collide in the archive. Sequence keys are unique across all runs, so archive tables keep a single-column primary key, and Power BI relationships stay one column wide. All raw tables share one sequence for `raw_row_id`, so a raw row ID is unique across every raw table, which the lineage relies on.
 
 ### Reporting
 
-Power BI reads views, never the live tables directly. Each view is the live table `UNION ALL` its archive copy (for example `archive.v_result_summary`), so reports show the in-flight run alongside every finalised one and don't go blank when the live schemas are cleared. Refresh Power BI after a run is finalised, not during the archive step.
+Power BI reads views, never the live tables directly. Each view is named after its archive table and is the live table `UNION ALL` its archive copy (for example `archive.v_results_result_summary`), so reports show the in-flight run alongside every finalised one and don't go blank when the live schemas are cleared. Refresh Power BI after a run is finalised, not during the archive step.
 
 ### Run completion process
 
@@ -129,6 +128,9 @@ UPDATE ref.run SET status = 'finalised' WHERE run_id = @run_id;
 DELETE FROM validation.result_validation;
 DELETE FROM results.result_detail_claim_without_timesheet;  -- each detail table
 DELETE FROM results.result_summary;
+DELETE FROM src.person_lineage;                            -- each lineage table
+DELETE FROM src.timesheet_lineage;
+DELETE FROM src.claim_file_lineage;
 DELETE FROM src.timesheet;
 DELETE FROM src.claim_file;
 DELETE FROM src.person;
@@ -140,6 +142,36 @@ COMMIT;
 The live tables use `DELETE`, not `TRUNCATE`, because SQL Server won't truncate a table that a foreign key points at, and the live tables keep their foreign keys. Step 3 is a loop over the registry with dynamic SQL, so a new table or test only needs registering to be archived.
 
 List columns explicitly rather than `SELECT *`, so a column added to a live table fails loudly instead of landing in the wrong archive column. When a table changes, change its archive copy in the same release.
+
+## Lineage
+
+Every finding can be traced back to the exact rows of client data behind it:
+
+```
+result_summary → result_detail_{test} → src.{entity} → src.{entity}_lineage → raw.{source} → source_file
+```
+
+| Step | How it links | Enforced |
+| --- | --- | --- |
+| Finding → detail | `result_detail_{test}.result_id`. Every finding has at least one detail row. | Yes |
+| Detail → modelled row | Each detail table has a foreign key column for every `src` table its test reads (`claim_line_id`, `timesheet_id`, `person_id`). A finding about two duplicate claim lines has two detail rows. | Yes |
+| Modelled row → raw rows | `src.{entity}_lineage`, one row per raw row behind each modelled row. Modelling isn't always one to one: duplicates merge, and one raw row can feed several tables. | To the `src` row, yes. To the raw row, no |
+| Raw row → file | `raw.{source}.source_file` and `loaded_at` | n/a |
+
+The raw end isn't an enforced key because `raw_row_id` points into whichever raw table `raw_table_id` names, and SQL Server can't enforce a key that changes table. It's still unambiguous, because all raw tables share one sequence. Sequence keys also stay unique across runs, so the same joins work on archived runs through the reporting views:
+
+```sql
+-- Raw claim-file rows behind every finding of one test. Lineage rows pointing at
+-- other raw tables need the same join to that table's view (or a union of them).
+SELECT d.result_id, d.claim_line_id, r.raw_row_id, r.source_file
+FROM archive.v_results_result_detail_claim_without_timesheet d
+JOIN archive.v_src_claim_file_lineage l  ON l.claim_line_id = d.claim_line_id
+JOIN ref.source_table_registry t         ON t.source_table_id = l.raw_table_id
+                                        AND t.schema_name = 'raw' AND t.table_name = 'claim_file'
+JOIN archive.v_raw_claim_file r          ON r.raw_row_id = l.raw_row_id;
+```
+
+Raw rows that are rejected or filtered out during modelling have no lineage row and are not tracked yet. A load-exceptions table could record them later if needed.
 
 ---
 
@@ -170,6 +202,7 @@ List columns explicitly rather than `SELECT *`, so a column added to a live tabl
 | `person` | `src` / `archive` | A vendor's worker. Grain: one row per person per run. `person_key` is the client's natural key. `vendor_id` is the vendor they work for. |
 | `timesheet` | `src` / `archive` | Hours worked. Grain: one row per `person_id`, `contract_vendor_id` and `work_date`. |
 | `claim_file` | `src` / `archive` | What the vendor claimed. Grain: one row per claim line, with claim header fields (`claim_number`, `submitted_date`) repeated on each line. `amount` is as submitted, not recalculated. |
+| `{entity}_lineage` | `src` / `archive` | One per `src` table (`person_lineage`, `timesheet_lineage`, `claim_file_lineage`). Grain: one row per modelled row and raw row it was built from. Every modelled row has at least one. |
 
 Each `src` table is unique on `run_id` + its natural key.
 
@@ -190,7 +223,7 @@ Each `src` table is unique on `run_id` + its natural key.
 | Entity | Schema | Role |
 | --- | --- | --- |
 | `result_summary` | `results` / `archive` | Generic. One row per finding per run, linked to the test and the vendor on the contract. `category_id` is set when test logic can auto-tag the finding and is null otherwise. Power BI dashboards report from this layer. |
-| `result_detail_{test}` | `results` / `archive` | One table per test with test-specific columns. Links to `result_summary` via `result_id` and carries `run_id`. Power BI drill-through lands here. Not validated. |
+| `result_detail_{test}` | `results` / `archive` | One table per test with test-specific columns. At least one row per finding. Links to `result_summary` via `result_id`, carries `run_id`, and has a foreign key to each `src` row behind the finding. Power BI drill-through lands here. Not validated. |
 | `finding_category` | `ref` | Taxonomy of finding types. Grows organically: the first findings arrive uncategorised, reviewers create categories, and later runs auto-tag where logic permits. |
 
 ### 6. Validation
@@ -218,6 +251,7 @@ Findings with no category never match a rule, so a new test's first run is revie
 | --- | --- |
 | Raw | `raw.claim_file`, `raw.timesheet`, `raw.person` |
 | Modelled | `src.claim_file`, `src.timesheet`, `src.person` |
+| Lineage | `src.claim_file_lineage`, `src.timesheet_lineage`, `src.person_lineage` |
 
 ### Result detail tables: `results.result_detail_{test}`
 
@@ -225,7 +259,7 @@ Examples: `results.result_detail_claim_without_timesheet`, `results.result_detai
 
 ### Archive tables: `archive.{schema}_{table}`
 
-Examples: `archive.raw_timesheet`, `archive.src_timesheet`, `archive.results_result_summary`, `archive.validation_result_validation`. Reporting views: `archive.v_{table}`.
+Examples: `archive.raw_timesheet`, `archive.src_timesheet`, `archive.results_result_summary`, `archive.validation_result_validation`. Reporting views add `v_`: `archive.v_{schema}_{table}`.
 
 ### General rules
 
